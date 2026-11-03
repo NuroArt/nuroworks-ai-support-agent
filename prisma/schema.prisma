@@ -1,0 +1,260 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// A Telegram user talking to the bot.
+model User {
+  id            String   @id @default(cuid())
+  telegramId    BigInt   @unique
+  username      String?
+  firstName     String?
+  languageCode  String?
+  isBlocked     Boolean  @default(false)
+  /// Temporary silence. Unlike isBlocked this lapses on its own.
+  mutedUntil    DateTime?
+  createdAt     DateTime @default(now())
+  lastSeenAt    DateTime @default(now())
+
+  conversations Conversation[]
+  tickets       Ticket[]
+  leads         Lead[]
+  approvals     ToolApproval[]
+  demoSlots     DemoSlot[]
+
+  @@index([lastSeenAt])
+}
+
+/// One continuous chat thread. Archived when escalated to a human.
+model Conversation {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isArchived Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  messages   Message[]
+  tickets    Ticket[]
+
+  @@index([userId, isArchived])
+}
+
+enum Role {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           Role
+  content        String
+  /// Document ids used to answer, when the reply came from the knowledge base.
+  sources        String[]     @default([])
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+model Ticket {
+  id             String        @id @default(cuid())
+  /// Human-facing reference, NW-0001. Assigned from `number`.
+  reference      String        @unique
+  /// Monotonic counter behind `reference`. Postgres sequence guarantees no gaps on concurrent inserts.
+  number         Int           @unique @default(autoincrement())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  summary        String
+  /// Flattened transcript at the moment of escalation, so later edits never rewrite history.
+  transcript     String
+  status         TicketStatus  @default(OPEN)
+  /// Telegram message id of the admin-group post, used to edit it on status change.
+  adminMessageId Int?
+
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  resolvedAt     DateTime?
+
+  @@index([status, createdAt])
+  @@index([userId])
+}
+
+enum EmbeddingStatus {
+  PENDING
+  INDEXED
+  FAILED
+}
+
+model KnowledgeDocument {
+  id         String            @id @default(cuid())
+  filename   String            @unique
+  title      String
+  mimeType   String
+  sizeBytes  Int
+  /// Hash of file contents. An unchanged file is skipped on rebuild.
+  contentHash String
+  status     EmbeddingStatus   @default(PENDING)
+  error      String?
+  chunkCount Int               @default(0)
+  createdAt  DateTime          @default(now())
+  indexedAt  DateTime?
+
+  chunks     KnowledgeChunk[]
+}
+
+model KnowledgeChunk {
+  id         String            @id @default(cuid())
+  documentId String
+  document   KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  ordinal    Int
+  content    String
+  /// Embedding vector as JSON. Portable to any Postgres; swap for pgvector if the
+  /// corpus outgrows in-process cosine similarity.
+  embedding  Float[]
+  createdAt  DateTime          @default(now())
+
+  @@unique([documentId, ordinal])
+  @@index([documentId])
+}
+
+model AdminSettings {
+  id                String   @id @default("singleton")
+  systemPrompt      String   @default("")
+  /// Below this retrieval score the bot says it does not know instead of guessing.
+  confidenceFloor   Float    @default(0.28)
+  escalationEnabled Boolean  @default(true)
+  /// Ceiling on what the AI may do. Tools above this level are not even
+  /// advertised to the model.
+  agentPermission   PermissionLevel @default(SUPPORT)
+  updatedAt         DateTime @updatedAt
+}
+
+/// Every billable model call, so spend can be attributed by operation.
+model TokenUsage {
+  id           String   @id @default(cuid())
+  operation    String   // chat | classify | summarize | ticket_summary | embed
+  provider     String   // claude | openai
+  model        String
+  inputTokens  Int      @default(0)
+  outputTokens Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([operation, createdAt])
+}
+
+/// Captured by the CollectLead tool when someone asks about using the product.
+model Lead {
+  id           String   @id @default(cuid())
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  name         String?
+  telegramUser String?
+  email        String?
+  businessType String?
+  notes        String?
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+/// Operational status surfaced by the GetSystemStatus tool. Rows are maintained
+/// by an operator; the bot only reads them, so it can never invent an outage.
+model ServiceStatus {
+  id        String   @id @default(cuid())
+  service   String   @unique
+  status    String   @default("operational") // operational | degraded | outage | maintenance
+  detail    String?
+  updatedAt DateTime @updatedAt
+}
+
+enum PermissionLevel {
+  READ_ONLY
+  SUPPORT
+  OPERATIONS
+  SUPER
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  DENIED
+  EXECUTED
+  EXPIRED
+}
+
+/// Per-tool override. A row exists only when an admin has changed something,
+/// so the registry's own defaults apply until someone decides otherwise.
+model ToolPolicy {
+  id               String   @id @default(cuid())
+  toolName         String   @unique
+  enabled          Boolean  @default(true)
+  /// Overrides the tool's built-in approval requirement. Null means inherit.
+  approvalRequired Boolean?
+  updatedAt        DateTime @updatedAt
+}
+
+/// A high-risk tool call waiting on a human. The arguments are frozen here at
+/// request time so approving later executes exactly what was reviewed.
+model ToolApproval {
+  id             String         @id @default(cuid())
+  reference      String         @unique
+  number         Int            @unique @default(autoincrement())
+  toolName       String
+  input          Json
+  riskLevel      String
+  requestedById  String
+  requestedBy    User           @relation(fields: [requestedById], references: [id], onDelete: Cascade)
+  conversationId String?
+  status         ApprovalStatus @default(PENDING)
+  decidedBy      String?
+  decidedAt      DateTime?
+  result         String?
+  createdAt      DateTime       @default(now())
+  expiresAt      DateTime
+
+  @@index([status, createdAt])
+}
+
+/// Booked by the ScheduleDemo tool. Slots are proposed by an operator in
+/// advance; the bot can only claim a free one, never invent a time.
+model DemoSlot {
+  id         String    @id @default(cuid())
+  startsAt   DateTime  @unique
+  durationMin Int      @default(30)
+  bookedById String?
+  bookedBy   User?     @relation(fields: [bookedById], references: [id], onDelete: SetNull)
+  bookedAt   DateTime?
+  contact    String?
+  notes      String?
+
+  @@index([startsAt, bookedById])
+}
+
+/// Telegram channels the bot may post announcements to. Managed by an admin;
+/// the bot can list them and request changes, never add one unilaterally.
+model Channel {
+  id        String   @id @default(cuid())
+  chatId    String   @unique
+  title     String
+  purpose   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+}

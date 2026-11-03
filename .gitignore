@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+.env
+.env.local
+*.log
+.DS_Store
+/knowledge/*
+!/knowledge/.gitkeep
+!/knowledge/README.md
+/src/generated/

@@ -1,0 +1,33 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: nuro
+      POSTGRES_PASSWORD: nuro
+      POSTGRES_DB: nuroworks_support
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nuro -d nuroworks_support"]
+      interval: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://nuro:nuro@db:5432/nuroworks_support
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    volumes:
+      # Knowledge files live outside the image so documents can be added
+      # without a rebuild.
+      - ./knowledge:/app/knowledge
+
+volumes:
+  pgdata:
