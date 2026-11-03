@@ -1,4 +1,4 @@
-import { defineConfig, env } from 'prisma/config';
+import { defineConfig, env } from '@prisma/config';
 
 /**
  * Prisma 7 does not load .env on its own. Node 22 can, and using the built-in
