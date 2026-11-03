@@ -21,7 +21,15 @@ export default function Login() {
     if (res.ok) { router.push('/admin'); router.refresh(); }
     else {
       const d = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(d.error ?? 'Incorrect password.');
+      // A 500 is not a wrong password — it usually means `env()` threw because
+      // a required variable is missing. Reporting that as "Incorrect password"
+      // sends the operator hunting for the wrong thing entirely.
+      setError(
+        d.error ??
+          (res.status >= 500
+            ? `Server error (${res.status}). Check the dev server log — a required environment variable is probably missing.`
+            : 'Incorrect password.'),
+      );
       setBusy(false);
     }
   }
